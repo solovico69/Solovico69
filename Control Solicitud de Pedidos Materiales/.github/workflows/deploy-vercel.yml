@@ -1,0 +1,72 @@
+name: Deploy to Vercel
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+jobs:
+  # Build & Deploy to Vercel
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+      
+      - name: Pull Vercel Configuration
+        run: vercel pull --yes --environment=${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }} --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: ./web-frontend
+      
+      - name: Build Configuration
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: ./web-frontend
+      
+      - name: Deploy to Vercel
+        run: vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }} --prod=${{ github.ref == 'refs/heads/main' }}
+        working-directory: ./web-frontend
+      
+      - name: Verify Deployment
+        run: |
+          echo "✅ Deployment complete!"
+          echo "📋 Frontend URL: https://${{ env.VERCEL_PROJECT_ID }}-${{ github.sha }}.vercel.app"
+      
+      - name: Trigger Google Apps Script Update
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "🔄 Web App deployed. Update GAS manifest with new URL if needed."
+
+  # Deploy preview for PRs
+  preview:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+      
+      - name: Deploy Preview
+        run: vercel deploy --token=${{ secrets.VERCEL_TOKEN }} --alias=${{ github.event.pull_request.head.sha }}
+        working-directory: ./web-frontend

@@ -1,0 +1,6 @@
+{
+  "name": "Dashboard Control de Gastos - Oficina Técnica Ibarra y Asociados",
+  "description": "Aplicación Web Corporativa para el control de gastos en obras, réplica de cálculos financieros, filtros jerárquicos, evidencias fotográficas y reportes PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

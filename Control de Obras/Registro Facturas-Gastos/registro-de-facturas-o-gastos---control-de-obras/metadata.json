@@ -1,0 +1,8 @@
+{
+  "name": "Registro de Facturas o Gastos - Control de Obras",
+  "description": "Sistema de Registro de Facturas y Control de Gastos para Obras de Oficina Técnica Ibarra y Asociados, C.A.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

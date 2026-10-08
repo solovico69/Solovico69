@@ -1,0 +1,378 @@
+Codigo.gs
+
+/**
+ * =========================================================================
+ * SISTEMA DE CONTROL DE ASISTENCIAS - SILOCOM C.A.
+ * RIF: J-30725192-1
+ * Archivo: Codigo.gs (Google Apps Script)
+ * Versión: 2.6 (Inteligencia Centralizada en Railway & Horarios Dinámicos)
+ * =========================================================================
+ * 🚀 NOVEDAD ARQUITECTÓNICA (Sin Triggers en Google Apps Script):
+ * A partir de esta versión, YA NO ES NECESARIO instalar activadores/triggers
+ * en el reloj de Google Apps Script.
+ * 
+ * El servidor persistente de Silocom en Railway (Node.js 24/7):
+ * 1. Lee automáticamente tus horarios desde la hoja 'Configuracion' (7:45, 8:30, 16:30, 17:30).
+ * 2. Si cambias los horarios en Sheets, Railway los detecta dinámicamente sin reinstalar código.
+ * 3. Despacha todos los recordatorios Push a los celulares sin depender de la cuota de Google.
+ * 4. Invoca el cierre automático diario de turnos a la hora fijada.
+ * 
+ * Pasos de Implementación:
+ * 1. Abre tu Google Sheets "Control de Asistencias - Silocom".
+ * 2. Ve a Extensiones > Apps Script.
+ * 3. Selecciona todo (Ctrl + A), bórralo y pega este código completo.
+ * 4. Guarda con el botón del Disquete (Ctrl + S).
+ * 5. Haz clic en "Implementar > Gestionar implementaciones > Editar (lápiz) > Nueva versión > Implementar".
+ * 6. (Opcional) Si tenías activadores viejos en Google, ejecuta la función
+ *    "eliminarTriggersHorarios" para limpiarlos.
+ * =========================================================================
+ */
+
+const CONFIG = {
+  HOJA_ASISTENCIAS: 'Asistencias',
+  HOJA_CONFIG: 'Configuracion',
+  HOJA_PUSH: 'DispositivosPush',
+  URL_PUSH_SERVER: 'https://silocom-production.up.railway.app/api/send-push',
+  PUSH_SECRET: 'silocom_push_sec_2026',
+  LATITUD_OFICINA: 10.494505,
+  LONGITUD_OFICINA: -66.831454,
+  RADIO_MAX_KM: 0.06,          // 0.06 km = 60 metros
+  TOLERANCIA_MIN: 30,          // 30 minutos de tolerancia
+  HORA_ENTRADA: 8,             // 08:00 (8:00 AM)
+  HORA_SALIDA: 17,             // 17:00 (5:00 PM)
+  RECORDATORIO_ENTRADA: '07:45',
+  AVISO_OLVIDO_ENTRADA: '08:30',
+  AVISO_PREVIO_SALIDA: '16:30',
+  VENTANA_ENTRADA_INI: 6,
+  VENTANA_ENTRADA_FIN: 12,
+  VENTANA_SALIDA_INI: 12,
+  VENTANA_SALIDA_FIN: 20,
+  ADMIN_EMAIL: 'vsolorzano.silocom@gmail.com'
+};
+
+function doGet(e) {
+  const params = e ? e.parameter : {};
+  const accion = params.action || 'obtenerDatos';
+
+  if (accion === 'obtenerConfiguracion') {
+    return respuestaJSON({
+      success: true,
+      config: obtenerConfiguracionDinamica()
+    });
+  }
+
+  if (accion === 'obtenerDatos') {
+    return respuestaJSON(leerBaseDeDatosCompleta());
+  }
+
+  return respuestaJSON({ error: 'Acción GET no reconocida' });
+}
+
+function doPost(e) {
+  try {
+    let body = {};
+    if (e && e.postData && e.postData.contents) {
+      body = JSON.parse(e.postData.contents);
+    }
+    const accion = body.action || '';
+
+    if (accion === 'registrarAsistencia') {
+      return respuestaJSON(registrarNuevaAsistencia(body.registro));
+    }
+    if (accion === 'guardarSuscripcionPush') {
+      return respuestaJSON(guardarSuscripcionDispositivo(body));
+    }
+    if (accion === 'eliminarTriggersHorarios') {
+      return respuestaJSON(eliminarTriggersHorarios());
+    }
+    if (accion === 'ejecutarCierreAutomatico') {
+      return respuestaJSON(ejecutarCierreAutomaticoTurnos());
+    }
+
+    return respuestaJSON({ error: 'Acción POST no reconocida: ' + accion });
+  } catch (err) {
+    return respuestaJSON({ error: err.toString() });
+  }
+}
+
+function leerBaseDeDatosCompleta() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaAsistencias = ss.getSheetByName(CONFIG.HOJA_ASISTENCIAS);
+  const hojaConfig = ss.getSheetByName(CONFIG.HOJA_CONFIG);
+
+  const registros = [];
+  if (hojaAsistencias && hojaAsistencias.getLastRow() > 1) {
+    const filas = hojaAsistencias.getRange(2, 1, hojaAsistencias.getLastRow() - 1, 8).getValues();
+    for (let i = 0; i < filas.length; i++) {
+      const f = filas[i];
+      if (f[0] || f[1]) {
+        registros.push({
+          id: (f[0] || '').toString().trim(),
+          nombre: (f[1] || '').toString().trim(),
+          fechaHora: (f[2] || '').toString().trim(),
+          tipo: (f[3] || '').toString().trim().toUpperCase(),
+          metodo: (f[4] || '').toString().trim(),
+          estatus: (f[5] || '').toString().trim(),
+          dia: (f[6] || '').toString().trim(),
+          mes: (f[7] || '').toString().trim()
+        });
+      }
+    }
+  }
+
+  const empleados = extraerEmpleadosDesdeConfig(hojaConfig);
+  const configDinamica = obtenerConfiguracionDinamica();
+
+  return {
+    registros: registros,
+    empleados: empleados,
+    config: configDinamica
+  };
+}
+
+function registrarNuevaAsistencia(reg) {
+  if (!reg || !reg.id || !reg.tipo) {
+    return { success: false, error: 'Datos de registro incompletos' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = ss.getSheetByName(CONFIG.HOJA_ASISTENCIAS);
+  if (!hoja) return { success: false, error: 'Hoja de asistencias no encontrada' };
+
+  const ultimaFila = hoja.getLastRow() + 1;
+  hoja.getRange(ultimaFila, 1, 1, 6).setValues([[
+    reg.id,
+    reg.nombre || reg.id,
+    reg.fechaHora,
+    reg.tipo.toUpperCase(),
+    reg.metodo || 'GEOLOCALIZACION',
+    reg.estatus || 'A TIEMPO'
+  ]]);
+
+  return { success: true, fila: ultimaFila };
+}
+
+function guardarSuscripcionDispositivo(body) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let hoja = ss.getSheetByName(CONFIG.HOJA_PUSH);
+  if (!hoja) {
+    hoja = ss.insertSheet(CONFIG.HOJA_PUSH);
+    hoja.appendRow(['userId', 'userName', 'endpoint', 'subscriptionJson', 'fechaRegistro']);
+  }
+
+  const endpoint = body.subscription ? body.subscription.endpoint : '';
+  if (!endpoint) return { success: false, error: 'Endpoint no válido' };
+
+  const ultimaFila = hoja.getLastRow();
+  if (ultimaFila > 1) {
+    const endpoints = hoja.getRange(2, 3, ultimaFila - 1, 1).getValues();
+    for (let i = 0; i < endpoints.length; i++) {
+      if (endpoints[i][0] === endpoint) {
+        hoja.getRange(i + 2, 4).setValue(JSON.stringify(body.subscription));
+        hoja.getRange(i + 2, 5).setValue(new Date().toISOString());
+        return { success: true, updated: true };
+      }
+    }
+  }
+
+  hoja.appendRow([
+    body.userId || 'ADMIN',
+    body.userName || 'Usuario Silocom',
+    endpoint,
+    JSON.stringify(body.subscription),
+    new Date().toISOString()
+  ]);
+
+  return { success: true, created: true };
+}
+
+function ejecutarCierreAutomaticoTurnos() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaAsistencias = ss.getSheetByName(CONFIG.HOJA_ASISTENCIAS);
+  if (!hojaAsistencias || hojaAsistencias.getLastRow() <= 1) {
+    return { success: true, cierresRealizados: 0 };
+  }
+
+  const filas = hojaAsistencias.getRange(2, 1, hojaAsistencias.getLastRow() - 1, 6).getValues();
+  const fechaHoyStr = Utilities.formatDate(new Date(), 'America/Caracas', 'dd/MM/yyyy');
+
+  const entradasHoy = {};
+  const salidasHoy = {};
+
+  for (let i = 0; i < filas.length; i++) {
+    const id = (filas[i][0] || '').toString().trim().toLowerCase();
+    const nombre = filas[i][1] || id;
+    const fStr = (filas[i][2] || '').toString().trim();
+    const tipo = (filas[i][3] || '').toString().trim().toUpperCase();
+
+    if (fStr.startsWith(fechaHoyStr)) {
+      if (tipo === 'ENTRADA') entradasHoy[id] = { nombre: nombre };
+      if (tipo === 'SALIDA') salidasHoy[id] = true;
+    }
+  }
+
+  let cierres = 0;
+  for (const empId in entradasHoy) {
+    if (!salidasHoy[empId]) {
+      const horaCierreOficial = fechaHoyStr + ', 17:00:00';
+      const sigFila = hojaAsistencias.getLastRow() + 1;
+      hojaAsistencias.getRange(sigFila, 1, 1, 6).setValues([[
+        empId,
+        entradasHoy[empId].nombre,
+        horaCierreOficial,
+        'SALIDA',
+        'SISTEMA_AUTO',
+        'CIERRE_AUTOMATICO'
+      ]]);
+      cierres++;
+    }
+  }
+
+  return { success: true, cierresRealizados: cierres, fecha: fechaHoyStr };
+}
+
+function eliminarTriggersHorarios() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let eliminados = 0;
+  for (let i = 0; i < triggers.length; i++) {
+    ScriptApp.deleteTrigger(triggers[i]);
+    eliminados++;
+  }
+  return {
+    success: true,
+    message: 'Se han eliminado ' + eliminados + ' activadores de Google Apps Script. Railway gestiona ahora el 100% de los horarios de forma autónoma.'
+  };
+}
+
+function formatearHoraCadena(val, fallback) {
+  if (val === null || val === undefined || val === '') return fallback;
+  if (val instanceof Date) {
+    var h = val.getHours();
+    var m = val.getMinutes();
+    return (h < 10 ? '0' + h : '' + h) + ':' + (m < 10 ? '0' + m : '' + m);
+  }
+  var str = val.toString().trim();
+  var match = str.match(/^(\d{1,2}):(\d{2})/);
+  if (match) {
+    var h = parseInt(match[1], 10);
+    var m = match[2];
+    return (h < 10 ? '0' + h : '' + h) + ':' + m;
+  }
+  var num = parseFloat(str);
+  if (!isNaN(num) && num >= 0 && num < 24) {
+    var h = Math.floor(num);
+    var m = Math.round((num - h) * 60);
+    return (h < 10 ? '0' + h : '' + h) + ':' + (m < 10 ? '0' + m : '' + m);
+  }
+  return fallback;
+}
+
+function obtenerConfiguracionDinamica() {
+  const configDinamica = {
+    latitud: CONFIG.LATITUD_OFICINA,
+    longitud: CONFIG.LONGITUD_OFICINA,
+    radioMaxKm: CONFIG.RADIO_MAX_KM,
+    toleranciaAvisoEntradaMin: CONFIG.TOLERANCIA_MIN,
+    horaEntrada: CONFIG.HORA_ENTRADA,
+    horaSalida: CONFIG.HORA_SALIDA,
+    recordatorioEntrada: CONFIG.RECORDATORIO_ENTRADA,
+    avisoOlvidoEntrada: CONFIG.AVISO_OLVIDO_ENTRADA,
+    avisoPrevioSalida: CONFIG.AVISO_PREVIO_SALIDA,
+    ventanaEntradaInicio: CONFIG.VENTANA_ENTRADA_INI,
+    ventanaEntradaFin: CONFIG.VENTANA_ENTRADA_FIN,
+    ventanaSalidaInicio: CONFIG.VENTANA_SALIDA_INI,
+    ventanaSalidaFin: CONFIG.VENTANA_SALIDA_FIN,
+    cierreAutomatico: '17:30',
+    adminEmail: CONFIG.ADMIN_EMAIL,
+    urlPushServer: CONFIG.URL_PUSH_SERVER
+  };
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const hojaConfig = ss.getSheetByName(CONFIG.HOJA_CONFIG);
+    if (!hojaConfig) return configDinamica;
+
+    const maxFilas = Math.min(10, hojaConfig.getLastRow() || 6);
+    const maxCols = Math.min(8, hojaConfig.getLastColumn() || 4);
+    const datos = hojaConfig.getRange(1, 1, maxFilas, maxCols).getValues();
+
+    for (let r = 0; r < datos.length; r++) {
+      for (let c = 0; c < datos[r].length; c++) {
+        const val = (datos[r][c] || '').toString().toLowerCase().trim();
+        const siguienteValor = (c + 1 < datos[r].length) ? datos[r][c + 1] : '';
+
+        if (val.includes('latitud') && siguienteValor !== '') {
+          const parsed = parseFloat(siguienteValor);
+          if (!isNaN(parsed)) configDinamica.latitud = parsed;
+        }
+        if (val.includes('longitud') && siguienteValor !== '') {
+          const parsed = parseFloat(siguienteValor);
+          if (!isNaN(parsed)) configDinamica.longitud = parsed;
+        }
+        if (val.includes('radio') && siguienteValor !== '') {
+          const parsed = parseFloat(siguienteValor);
+          if (!isNaN(parsed)) {
+            configDinamica.radioMaxKm = parsed > 1 ? parsed / 1000 : parsed;
+          }
+        }
+        if ((val.includes('railway') || val.includes('push') || val.includes('servidor') || val.includes('vercel')) && siguienteValor !== '') {
+          configDinamica.urlPushServer = siguienteValor.toString().trim();
+        }
+
+        if ((val.includes('recordatorio entrada') || val.includes('alerta entrada') || val.includes('recordatorio_entrada') || val.includes('hora recordatorio entrada')) && siguienteValor !== '') {
+          configDinamica.recordatorioEntrada = formatearHoraCadena(siguienteValor, configDinamica.recordatorioEntrada);
+        }
+        if ((val.includes('aviso olvido') || val.includes('olvido entrada') || val.includes('alerta olvido') || val.includes('aviso_olvido')) && siguienteValor !== '') {
+          configDinamica.avisoOlvidoEntrada = formatearHoraCadena(siguienteValor, configDinamica.avisoOlvidoEntrada);
+        }
+        if ((val.includes('recordatorio salida') || val.includes('aviso previo salida') || val.includes('alerta salida') || val.includes('aviso salida')) && siguienteValor !== '') {
+          configDinamica.avisoPrevioSalida = formatearHoraCadena(siguienteValor, configDinamica.avisoPrevioSalida);
+        }
+        if ((val.includes('cierre') || val.includes('cierre automatico') || val.includes('cierre_automatico') || val.includes('cierre turnos')) && siguienteValor !== '') {
+          configDinamica.cierreAutomatico = formatearHoraCadena(siguienteValor, configDinamica.cierreAutomatico);
+        }
+        if (val === 'hora entrada' && siguienteValor !== '') {
+          const parsedH = parseFloat(siguienteValor);
+          if (!isNaN(parsedH)) configDinamica.horaEntrada = parsedH;
+        }
+        if (val === 'hora salida' && siguienteValor !== '') {
+          const parsedH = parseFloat(siguienteValor);
+          if (!isNaN(parsedH)) configDinamica.horaSalida = parsedH;
+        }
+      }
+    }
+  } catch (e) {}
+
+  return configDinamica;
+}
+
+function extraerEmpleadosDesdeConfig(hojaConfig) {
+  const empleados = [];
+  if (!hojaConfig || hojaConfig.getLastRow() <= 6) return empleados;
+
+  const totalFilas = hojaConfig.getLastRow();
+  const filas = hojaConfig.getRange(7, 1, totalFilas - 6, 4).getValues();
+
+  for (let i = 0; i < filas.length; i++) {
+    const rawId = (filas[i][0] || '').toString().trim();
+    const id = rawId.toLowerCase();
+    const nombre = (filas[i][1] || '').toString().trim();
+    const dispositivo = (filas[i][2] || '').toString().trim();
+
+    const esCabecera = !id || ['id', 'usuario', 'correo', 'email', 'id / correo', 'identificador', 'colaborador', 'empleado', 'parametro'].includes(id);
+    if (!esCabecera) {
+      empleados.push({
+        id: rawId,
+        nombre: nombre || rawId,
+        idDispositivo: dispositivo,
+        activo: true
+      });
+    }
+  }
+  return empleados;
+}
+
+function respuestaJSON(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}

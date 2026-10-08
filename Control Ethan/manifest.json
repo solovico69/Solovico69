@@ -1,0 +1,24 @@
+{
+  "name": "Control Ethan - Inventario & Ventas",
+  "short_name": "Control Ethan",
+  "description": "Sistema de gestión de inventario y ventas para iPhone con sincronización en tiempo real",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#071710",
+  "theme_color": "#0b251a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
